@@ -136,16 +136,16 @@ class MockRedis {
 }
 
 // Try to use real Redis, fallback to Mock if configured or error
-const useMock = process.env.USE_MOCK_REDIS === 'true' || true; // Force mock for now to unblock user
+const useMock = process.env.USE_MOCK_REDIS === 'true';
 
 // @ts-ignore
-export const redis = useMock ? new MockRedis() : new Redis({
+export const redis = useMock ? new MockRedis() : (process.env.REDIS_URL ? new Redis(process.env.REDIS_URL) : new Redis({
     host: process.env.REDIS_HOST || 'localhost',
     port: parseInt(process.env.REDIS_PORT || '6379', 10),
     password: process.env.REDIS_PASSWORD || undefined,
     retryDelayOnFailover: 100,
     maxRetriesPerRequest: 3,
-});
+}));
 
 if (!useMock) {
     (redis as any).on('connect', () => {
