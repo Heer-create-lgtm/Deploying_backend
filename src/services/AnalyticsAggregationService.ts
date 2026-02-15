@@ -1,5 +1,6 @@
 import { AnalyticsEvent, AnalyticsEventType, DeviceType } from '../models/AnalyticsEvent';
 import { Variant } from '../models/Variant';
+import { VariantStats } from '../models/VariantStats';
 import { redis } from '../config/database';
 
 /**
@@ -101,6 +102,8 @@ export class AnalyticsAggregationService {
 
     /**
      * Get hub overview metrics
+     * Uses AnalyticsEvent with time-window filtering for accurate range-based data
+     * Falls back to VariantStats for lifetime/all-time
      */
     async getHubOverview(hubId: string, window: TimeWindow = TimeWindow.TWENTY_FOUR_HOURS): Promise<HubOverviewMetrics> {
         const cacheKey = `${this.cachePrefix}overview:${hubId}:${window}`;
@@ -113,10 +116,86 @@ export class AnalyticsAggregationService {
 
         const windowMs = getWindowMs(window);
         const startDate = new Date(Date.now() - windowMs);
-        const prevStartDate = new Date(Date.now() - (windowMs * 2));
 
-        // Current period metrics
-        const [impressions, clicks, uniqueSessions] = await Promise.all([
+        let totalClicks = 0;
+        let totalImpressions = 0;
+        let avgCtr = 0;
+
+        if (window === TimeWindow.LIFETIME) {
+            // For lifetime, use VariantStats (all-time aggregate)
+            const stats = await VariantStats.aggregate([
+                { $match: { hub_id: hubId } },
+                {
+                    $group: {
+                        _id: null,
+                        total_clicks: { $sum: '$clicks' },
+                        total_impressions: { $sum: '$impressions' },
+                        avg_ctr: { $avg: '$ctr' }
+                    }
+                }
+            ]);
+            const aggregated = stats[0] || { total_clicks: 0, total_impressions: 0, avg_ctr: 0 };
+            totalClicks = aggregated.total_clicks;
+            totalImpressions = aggregated.total_impressions;
+            avgCtr = aggregated.avg_ctr;
+        } else {
+            // For time-windowed queries, count from AnalyticsEvent with timestamp filter
+            const [clickCount, impressionCount] = await Promise.all([
+                AnalyticsEvent.countDocuments({
+                    hub_id: hubId,
+                    event_type: AnalyticsEventType.LINK_CLICK,
+                    timestamp: { $gte: startDate }
+                }),
+                AnalyticsEvent.countDocuments({
+                    hub_id: hubId,
+                    event_type: AnalyticsEventType.HUB_IMPRESSION,
+                    timestamp: { $gte: startDate }
+                })
+            ]);
+            totalClicks = clickCount;
+            totalImpressions = impressionCount;
+            avgCtr = totalImpressions > 0 ? totalClicks / totalImpressions : 0;
+        }
+
+        // Count unique sessions from events for visitor count
+        const uniqueSessions = await AnalyticsEvent.distinct('session_id', {
+            hub_id: hubId,
+            timestamp: { $gte: startDate }
+        });
+
+        // Top performing link within the time window
+        const topClickAgg = await AnalyticsEvent.aggregate([
+            {
+                $match: {
+                    hub_id: hubId,
+                    event_type: AnalyticsEventType.LINK_CLICK,
+                    timestamp: { $gte: startDate }
+                }
+            },
+            {
+                $group: {
+                    _id: '$variant_id',
+                    clicks: { $sum: 1 }
+                }
+            },
+            { $sort: { clicks: -1 } },
+            { $limit: 1 }
+        ]);
+
+        let topLink: { link_id: string; name: string; clicks: number } | null = null;
+        if (topClickAgg.length > 0) {
+            const topVariantId = topClickAgg[0]._id;
+            const variant = await Variant.findOne({ variant_id: topVariantId }).lean();
+            topLink = {
+                link_id: topVariantId,
+                name: variant?.target_url?.substring(0, 50) || topVariantId,
+                clicks: topClickAgg[0].clicks
+            };
+        }
+
+        // Traffic trend (compare with previous period events)
+        const prevStartDate = new Date(Date.now() - (windowMs * 2));
+        const [currentEvents, prevEvents] = await Promise.all([
             AnalyticsEvent.countDocuments({
                 hub_id: hubId,
                 event_type: AnalyticsEventType.HUB_IMPRESSION,
@@ -124,46 +203,25 @@ export class AnalyticsAggregationService {
             }),
             AnalyticsEvent.countDocuments({
                 hub_id: hubId,
-                event_type: AnalyticsEventType.LINK_CLICK,
-                timestamp: { $gte: startDate }
-            }),
-            AnalyticsEvent.distinct('session_id', {
-                hub_id: hubId,
-                timestamp: { $gte: startDate }
+                event_type: AnalyticsEventType.HUB_IMPRESSION,
+                timestamp: { $gte: prevStartDate, $lt: startDate }
             })
         ]);
 
-        // Previous period for trend
-        const prevImpressions = await AnalyticsEvent.countDocuments({
-            hub_id: hubId,
-            event_type: AnalyticsEventType.HUB_IMPRESSION,
-            timestamp: { $gte: prevStartDate, $lt: startDate }
-        });
-
-        // Unique users (approximated by unique sessions)
-        const uniqueUsers = uniqueSessions.length;
-
-        // Average CTR
-        const averageCtr = impressions > 0 ? (clicks / impressions) * 100 : 0;
-
-        // Top performing link
-        const topLink = await this.getTopPerformingLink(hubId, startDate);
-
-        // Traffic trend
         let trend: 'up' | 'down' | 'stable' = 'stable';
         let trendPercentage = 0;
-        if (prevImpressions > 0) {
-            trendPercentage = ((impressions - prevImpressions) / prevImpressions) * 100;
+        if (prevEvents > 0) {
+            trendPercentage = ((currentEvents - prevEvents) / prevEvents) * 100;
             if (trendPercentage > 5) trend = 'up';
             else if (trendPercentage < -5) trend = 'down';
         }
 
         const result: HubOverviewMetrics = {
-            total_visits: impressions,
-            unique_users: uniqueUsers,
+            total_visits: totalImpressions,
+            unique_users: uniqueSessions.length,
             total_sessions: uniqueSessions.length,
-            total_clicks: clicks,
-            average_ctr: Math.round(averageCtr * 100) / 100,
+            total_clicks: totalClicks,
+            average_ctr: Math.round((avgCtr || 0) * 10000) / 100,
             top_performing_link: topLink,
             traffic_trend: trend,
             trend_percentage: Math.round(trendPercentage * 100) / 100
@@ -270,7 +328,7 @@ export class AnalyticsAggregationService {
     }
 
     /**
-     * Get link performance metrics
+     * Get link performance metrics - time-window filtered from AnalyticsEvent
      */
     async getLinkPerformance(hubId: string, window: TimeWindow = TimeWindow.TWENTY_FOUR_HOURS): Promise<LinkPerformanceMetrics[]> {
         const cacheKey = `${this.cachePrefix}links:${hubId}:${window}`;
@@ -280,26 +338,59 @@ export class AnalyticsAggregationService {
             if (cached) return JSON.parse(cached);
         } catch { /* ignore */ }
 
+        // Get all variants for this hub
+        const variants = await Variant.find({ hub_id: hubId }).lean();
+
+        if (window === TimeWindow.LIFETIME) {
+            // For lifetime, use VariantStats (all-time)
+            const allStats = await VariantStats.find({ hub_id: hubId }).lean();
+            const statsMap = new Map(allStats.map(s => [s.variant_id, s]));
+
+            const result: LinkPerformanceMetrics[] = variants.map(variant => {
+                const stats = statsMap.get(variant.variant_id);
+                const clicks = stats?.clicks || 0;
+                const impressions = stats?.impressions || 0;
+                const ctr = stats?.ctr || 0;
+                const score = stats?.score || 0;
+
+                return {
+                    link_id: variant.variant_id,
+                    variant_id: variant.variant_id,
+                    name: variant.target_url.substring(0, 50),
+                    target_url: variant.target_url,
+                    impressions,
+                    clicks,
+                    ctr: Math.round(ctr * 10000) / 100,
+                    rank_score: Math.round(score * 100) / 100
+                };
+            });
+
+            result.sort((a, b) => b.clicks - a.clicks);
+
+            try {
+                await redis.setex(cacheKey, this.cacheTTL, JSON.stringify(result));
+            } catch { /* ignore */ }
+
+            return result;
+        }
+
+        // For time-windowed queries, aggregate from AnalyticsEvent
         const windowMs = getWindowMs(window);
         const startDate = new Date(Date.now() - windowMs);
 
-        // Get all variants for this hub
-        const variants = await Variant.find({ hub_id: hubId });
-
-        // Get hub impressions (total for CTR calculation)
+        // Count impressions in this window (hub-level — each variant gets same count)
         const totalImpressions = await AnalyticsEvent.countDocuments({
             hub_id: hubId,
             event_type: AnalyticsEventType.HUB_IMPRESSION,
             timestamp: { $gte: startDate }
         });
 
-        // Get clicks per variant with time-decay
+        // Count clicks per variant in this window
         const clicksAgg = await AnalyticsEvent.aggregate([
             {
                 $match: {
                     hub_id: hubId,
                     event_type: AnalyticsEventType.LINK_CLICK,
-                    variant_id: { $ne: null },
                     timestamp: { $gte: startDate }
                 }
             },
@@ -311,16 +402,12 @@ export class AnalyticsAggregationService {
                 }
             }
         ]);
-
         const clicksMap = new Map(clicksAgg.map(c => [c._id, { clicks: c.clicks, latest: c.latest_click }]));
 
-        // Compute metrics for each variant
         const result: LinkPerformanceMetrics[] = variants.map(variant => {
             const clickData = clicksMap.get(variant.variant_id) || { clicks: 0, latest: null };
             const clicks = clickData.clicks;
             const ctr = totalImpressions > 0 ? (clicks / totalImpressions) * 100 : 0;
-
-            // Time-decay rank score
             const rankScore = this.computeRankScore(clicks, clickData.latest);
 
             return {
@@ -335,8 +422,7 @@ export class AnalyticsAggregationService {
             };
         });
 
-        // Sort by rank_score descending
-        result.sort((a, b) => b.rank_score - a.rank_score);
+        result.sort((a, b) => b.clicks - a.clicks);
 
         try {
             await redis.setex(cacheKey, this.cacheTTL, JSON.stringify(result));

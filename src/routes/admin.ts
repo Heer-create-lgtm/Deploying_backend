@@ -385,7 +385,7 @@ router.get('/hubs/:hub_id/stats', requireAuth, requireOwnership, async (req: IAu
             total_clicks: stats.reduce((sum, s) => sum + s.clicks, 0),
             total_impressions: stats.reduce((sum, s) => sum + s.impressions, 0),
             average_ctr: stats.length > 0
-                ? stats.reduce((sum, s) => sum + s.ctr, 0) / stats.length
+                ? (stats.reduce((sum, s) => sum + s.ctr, 0) / stats.length) * 100
                 : 0,
             variant_count: stats.length,
         };
@@ -413,6 +413,82 @@ router.post('/hubs/:hub_id/stats/aggregate', requireAuth, requireOwnership, asyn
     } catch (error) {
         console.error('Aggregate stats error:', error);
         return res.status(500).json({ error: 'Failed to aggregate stats' });
+    }
+});
+
+// ============== URL SHORTENING ==============
+
+import { shortenerService, ShortenerProvider } from '../services/ShortenerService';
+
+/**
+ * Shorten a hub's URL using free URL shortening APIs
+ * POST /hubs/:hub_id/shorten
+ * Requires authentication and ownership
+ */
+router.post('/hubs/:hub_id/shorten', requireAuth, requireOwnership, async (req: IAuthenticatedRequest, res: Response) => {
+    try {
+        const { hub_id } = req.params;
+        const { provider = 'tinyurl' } = req.body;
+
+        // Validate provider
+        const validProviders: ShortenerProvider[] = ['tinyurl', 'isgd', 'dagd', 'clckru'];
+        if (!validProviders.includes(provider as ShortenerProvider)) {
+            return res.status(400).json({
+                error: `Invalid provider. Supported: ${validProviders.join(', ')}`
+            });
+        }
+
+        // Get hub
+        const hub = await LinkHub.findOne({ hub_id });
+        if (!hub) {
+            return res.status(404).json({ error: 'Hub not found' });
+        }
+
+        // Build the full URL of the hub
+        const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:3000';
+        const hubUrl = `${frontendUrl}/${hub.slug}`;
+
+        // Check if shortener service is available
+        const available = await shortenerService.isAvailable();
+        if (!available) {
+            return res.status(503).json({
+                error: 'URL shortener APIs are unreachable',
+                hint: 'Check your internet connection or try again later'
+            });
+        }
+
+        // Shorten the URL
+        const result = await shortenerService.shortenUrl(hubUrl, provider as ShortenerProvider);
+
+        // Save to hub
+        hub.external_short_url = result.short_url;
+        await hub.save();
+
+        return res.json({
+            external_short_url: result.short_url,
+            original_url: result.original_url,
+            provider: result.provider,
+            note: result.note,
+        });
+    } catch (error: any) {
+        console.error('Shorten URL error:', error);
+        return res.status(500).json({ error: error.message || 'Failed to shorten URL' });
+    }
+});
+
+/**
+ * Check if URL shortening APIs are available
+ * GET /shortener/status
+ */
+router.get('/shortener/status', requireAuth, async (_req: IAuthenticatedRequest, res: Response) => {
+    try {
+        const available = await shortenerService.isAvailable();
+        return res.json({
+            available,
+            providers: ['tinyurl', 'isgd', 'dagd', 'clckru'],
+        });
+    } catch (error) {
+        return res.json({ available: false });
     }
 });
 

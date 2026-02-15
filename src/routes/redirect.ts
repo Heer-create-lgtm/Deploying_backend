@@ -7,6 +7,7 @@ import { eventLogger } from '../services/EventLogger';
 import { analyticsEventService } from '../services/AnalyticsEventService';
 import { analyticsAggregationService } from '../services/AnalyticsAggregationService';
 import { AnalyticsEventType, SourceType } from '../models/AnalyticsEvent';
+import { geoIPService } from '../services/GeoIPService';
 
 const router = Router();
 
@@ -28,10 +29,11 @@ router.get('/:slug', async (req: Request, res: Response) => {
             return res.status(404).json({ error: 'Hub not found' });
         }
 
-        // Build request context
+        // Build request context with async geolocation
+        const country = await getCountryFromRequest(req);
         const context: IRequestContext = {
             userAgent: req.headers['user-agent'] || '',
-            country: extractCountry(req),
+            country,
             lat: parseFloat(req.query.lat as string) || 0,
             lon: parseFloat(req.query.lon as string) || 0,
             timestamp: new Date(),
@@ -72,7 +74,7 @@ router.get('/:slug', async (req: Request, res: Response) => {
         // Get device info for logging
         const deviceInfo = decisionTreeEngine.parseDevice(context.userAgent);
 
-        // Log HUB_VIEW event
+        // Log HUB_VIEW event to Redis stream
         eventLogger.logHubView({
             hub_id: hub.hub_id,
             ip: getClientIP(req),
@@ -82,9 +84,57 @@ router.get('/:slug', async (req: Request, res: Response) => {
             timestamp: context.timestamp,
         });
 
+        // Log HUB_IMPRESSION to AnalyticsEvent collection (for analytics queries)
+        const sessionId = req.cookies?.session_id || `session_${Date.now()}`;
+        analyticsEventService.logHubImpression(
+            hub.hub_id,
+            sessionId,
+            context.userAgent,
+            req.headers.referer,
+            getClientIP(req),
+            SourceType.DIRECT
+        );
+
+        // Immediately update impressions for all filtered/visible links
+        // This ensures impression counts are updated in real-time
+        if (filteredLinks.length > 0) {
+            try {
+                const bulkOps = filteredLinks.map((link: { variant_id: string }) => ({
+                    updateOne: {
+                        filter: { variant_id: link.variant_id, hub_id: hub.hub_id },
+                        update: {
+                            $inc: { impressions: 1 },
+                            $set: { last_updated: new Date() }
+                        },
+                        upsert: true
+                    }
+                }));
+                await VariantStats.bulkWrite(bulkOps);
+
+                // Update CTR for all affected variants
+                for (const link of filteredLinks) {
+                    const stats = await VariantStats.findOne({ variant_id: link.variant_id, hub_id: hub.hub_id });
+                    if (stats && stats.impressions > 0) {
+                        const ctr = stats.clicks / stats.impressions;
+                        const score = (stats.clicks * 0.3) + (ctr * 100 * 0.7);
+                        await VariantStats.updateOne(
+                            { variant_id: link.variant_id, hub_id: hub.hub_id },
+                            { $set: { ctr, score } }
+                        );
+                    }
+                }
+            } catch (statsError) {
+                // Log but don't fail the request
+                console.error('Impression stats update error (non-blocking):', statsError);
+            }
+        }
+
+
+
         // Return JSON response for the Link Hub page
         return res.json({
             profile: {
+                hub_id: hub.hub_id,
                 username: hub.username || hub.slug,
                 avatar: hub.avatar || null,
                 bio: hub.bio || '',
@@ -122,10 +172,11 @@ router.get('/:slug/go', async (req: Request, res: Response) => {
             return res.status(404).json({ error: 'Hub not found' });
         }
 
-        // Build request context from the actual request
+        // Build request context from the actual request with async geolocation
+        const country = await getCountryFromRequest(req);
         const context: IRequestContext = {
             userAgent: req.headers['user-agent'] || '',
-            country: extractCountry(req),
+            country,
             lat: parseFloat(req.query.lat as string) || 0,
             lon: parseFloat(req.query.lon as string) || 0,
             timestamp: new Date(),
@@ -216,6 +267,32 @@ router.get('/:slug/go', async (req: Request, res: Response) => {
             chosen_variant_id: bestLink.variant_id,
         });
 
+        // Immediately update VariantStats for real-time analytics
+        try {
+            const stats = await VariantStats.findOneAndUpdate(
+                { variant_id: bestLink.variant_id, hub_id: hub.hub_id },
+                {
+                    $inc: { clicks: 1, recent_clicks_hour: 1 },
+                    $set: { last_updated: new Date() }
+                },
+                { upsert: true, new: true }
+            );
+
+            // Recalculate CTR and score
+            if (stats) {
+                const impressions = stats.impressions || 1;
+                const ctr = stats.clicks / impressions;
+                const score = (stats.clicks * 0.3) + (ctr * 100 * 0.7);
+                
+                await VariantStats.updateOne(
+                    { variant_id: bestLink.variant_id, hub_id: hub.hub_id },
+                    { $set: { ctr, score } }
+                );
+            }
+        } catch (statsError) {
+            console.error('VariantStats update error (non-blocking):', statsError);
+        }
+
         // Redirect to the best matching link
         return res.redirect(bestLink.target_url);
     } catch (error) {
@@ -227,6 +304,9 @@ router.get('/:slug/go', async (req: Request, res: Response) => {
 /**
  * Click tracking endpoint
  * POST /api/analytics/click - Logs link click events
+ * 
+ * This endpoint immediately updates VariantStats in addition to async event logging
+ * to ensure analytics are reflected in real-time.
  */
 router.post('/api/analytics/click', async (req: Request, res: Response) => {
     try {
@@ -245,11 +325,13 @@ router.post('/api/analytics/click', async (req: Request, res: Response) => {
         };
 
         const deviceInfo = decisionTreeEngine.parseDevice(context.userAgent);
+        const sessionId = req.cookies?.session_id || `session_${Date.now()}`;
+        const clientIP = getClientIP(req);
 
-        // Log CLICK event
+        // Log CLICK event to Redis stream (async, for background processing)
         eventLogger.logClick({
             hub_id,
-            ip: getClientIP(req),
+            ip: clientIP,
             country: context.country,
             lat: context.lat,
             lon: context.lon,
@@ -258,6 +340,48 @@ router.post('/api/analytics/click', async (req: Request, res: Response) => {
             timestamp: context.timestamp,
             chosen_variant_id: variant_id,
         });
+
+        // Log LINK_CLICK to AnalyticsEvent collection (for analytics queries)
+        // This is the critical call that updates the analytics dashboard
+        analyticsEventService.logLinkClick(
+            hub_id,
+            variant_id,
+            variant_id,
+            sessionId,
+            context.userAgent,
+            req.headers.referer,
+            clientIP,
+            { source_type: SourceType.DIRECT }
+        );
+
+        // Immediately update VariantStats for real-time analytics
+        // This ensures analytics are updated on every click without waiting for aggregation
+        try {
+            const stats = await VariantStats.findOneAndUpdate(
+                { variant_id, hub_id },
+                {
+                    $inc: { clicks: 1, recent_clicks_hour: 1 },
+                    $set: { last_updated: new Date() }
+                },
+                { upsert: true, new: true }
+            );
+
+            // Recalculate CTR and score
+            if (stats) {
+                const impressions = stats.impressions || 1; // Avoid division by zero
+                const ctr = stats.clicks / impressions;
+                // Simple score: weighted combination of clicks and CTR
+                const score = (stats.clicks * 0.3) + (ctr * 100 * 0.7);
+                
+                await VariantStats.updateOne(
+                    { variant_id, hub_id },
+                    { $set: { ctr, score } }
+                );
+            }
+        } catch (statsError) {
+            // Log but don't fail the request - stats update is secondary
+            console.error('VariantStats update error (non-blocking):', statsError);
+        }
 
         return res.json({ success: true });
     } catch (error) {
@@ -512,6 +636,7 @@ router.get('/:slug/debug', async (req: Request, res: Response) => {
             total_variants: variants.length,
             filtered_links: filteredLinks.length,
             links: filteredLinks,
+            all_variants_debug: variantsWithConditions, // Added for debugging
         });
     } catch (error) {
         console.error('Debug error:', error);
@@ -520,9 +645,10 @@ router.get('/:slug/debug', async (req: Request, res: Response) => {
 });
 
 /**
- * Extract country from request headers or query params
+ * Extract country from request headers, query params, or IP geolocation
+ * Note: This function is async - use getCountryFromRequest for async IP lookup
  */
-function extractCountry(req: Request): string {
+function extractCountrySync(req: Request): string | null {
     const cfCountry = req.headers['cf-ipcountry'];
     if (cfCountry) return cfCountry as string;
 
@@ -531,7 +657,31 @@ function extractCountry(req: Request): string {
 
     if (req.query.country) return req.query.country as string;
 
+    return null; // Need async IP lookup
+}
+
+/**
+ * Get country from request with IP-based geolocation fallback
+ */
+async function getCountryFromRequest(req: Request): Promise<string> {
+    // Try sync methods first (headers, query params)
+    const syncCountry = extractCountrySync(req);
+    if (syncCountry) return syncCountry;
+
+    // Fallback to IP geolocation
+    const ip = getClientIP(req);
+    const geoResult = await geoIPService.lookupIP(ip);
+    
+    if (geoResult) {
+        return geoResult.countryCode;
+    }
+
     return 'unknown';
+}
+
+// Legacy sync function for backwards compatibility
+function extractCountry(req: Request): string {
+    return extractCountrySync(req) || 'unknown';
 }
 
 /**

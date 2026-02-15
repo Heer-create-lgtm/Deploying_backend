@@ -5,6 +5,7 @@ import { variantResolver } from '../services/VariantResolver';
 import { cacheService } from '../services/CacheService';
 import { eventLogger } from '../services/EventLogger';
 import { analyticsEventService } from '../services/AnalyticsEventService';
+import { geoIPService } from '../services/GeoIPService';
 import { v4 as uuidv4 } from 'uuid';
 
 const router = Router();
@@ -25,39 +26,26 @@ router.get('/:code', async (req: Request, res: Response) => {
             return res.status(404).json({ error: 'Short URL not found' });
         }
 
-        // Build request context
+        // Build request context with async geolocation
+        const country = await getCountryFromRequest(req);
         const context: IRequestContext = {
             userAgent: req.headers['user-agent'] || '',
-            country: extractCountry(req),
+            country,
             lat: parseFloat(req.query.lat as string) || 0,
             lon: parseFloat(req.query.lon as string) || 0,
             timestamp: new Date(),
         };
 
-        // Get the rule tree (cached)
-        const ruleTree = await cacheService.getRuleTree(hub.hub_id);
-
-        let targetUrl = hub.default_url;
-        let chosenVariantId = 'default';
-
-        if (ruleTree) {
-            const variantIds = decisionTreeEngine.traverse(context, ruleTree.root);
-
-            if (variantIds && variantIds.length > 0) {
-                const variant = await variantResolver.resolveVariant(variantIds, hub.hub_id);
-
-                if (variant) {
-                    targetUrl = variant.target_url;
-                    chosenVariantId = variant.variant_id;
-                }
-            }
-        }
-
-        // Get device info for logging
-        const deviceInfo = decisionTreeEngine.parseDevice(context.userAgent);
+        // Redirect to Hub Profile Page (Frontend)
+        // User requested that /r/:code should open the Full URL (Hub Profile)
+        // rather than the smart redirect target.
+        const hubProfileUrl = `/${hub.slug}`;
 
         // Generate session ID
         const sessionId = req.cookies?.session_id || uuidv4();
+
+        // Get device info for logging
+        const deviceInfo = decisionTreeEngine.parseDevice(context.userAgent);
 
         // Create base event context
         const eventContext = {
@@ -69,14 +57,14 @@ router.get('/:code', async (req: Request, res: Response) => {
             user_agent: context.userAgent,
             device_type: deviceInfo.type,
             timestamp: context.timestamp,
-            chosen_variant_id: chosenVariantId,
+            chosen_variant_id: 'hub_profile',
         };
 
         // Log to legacy eventLogger
         eventLogger.logImpression(eventContext);
         eventLogger.logClick(eventContext);
 
-        // Log to analyticsEventService (MongoDB for Analysis Page)
+        // Log to analyticsEventService
         analyticsEventService.logHubImpression(
             hub.hub_id,
             sessionId,
@@ -84,26 +72,17 @@ router.get('/:code', async (req: Request, res: Response) => {
             req.headers.referer,
             getClientIP(req)
         );
-        analyticsEventService.logLinkClick(
-            hub.hub_id,
-            chosenVariantId,
-            chosenVariantId,
-            sessionId,
-            context.userAgent,
-            req.headers.referer,
-            getClientIP(req)
-        );
         analyticsEventService.logRedirect(
             hub.hub_id,
-            chosenVariantId,
+            'hub_profile', // explicit variant
             sessionId,
             context.userAgent,
-            targetUrl,
+            hubProfileUrl,
             getClientIP(req)
         );
 
-        // Redirect to the target URL
-        return res.redirect(302, targetUrl);
+        // Redirect to the Hub Profile
+        return res.redirect(302, hubProfileUrl);
     } catch (error) {
         console.error('Short URL redirect error:', error);
         return res.status(500).json({ error: 'Internal server error' });
@@ -111,9 +90,10 @@ router.get('/:code', async (req: Request, res: Response) => {
 });
 
 /**
- * Extract country from request headers
+ * Get country from request with IP-based geolocation fallback
  */
-function extractCountry(req: Request): string {
+async function getCountryFromRequest(req: Request): Promise<string> {
+    // Try headers first (Cloudflare, custom)
     const cfCountry = req.headers['cf-ipcountry'];
     if (cfCountry) return cfCountry as string;
 
@@ -122,7 +102,10 @@ function extractCountry(req: Request): string {
 
     if (req.query.country) return req.query.country as string;
 
-    return 'unknown';
+    // Fallback to IP geolocation
+    const ip = getClientIP(req);
+    const geoResult = await geoIPService.lookupIP(ip);
+    return geoResult?.countryCode || 'unknown';
 }
 
 /**

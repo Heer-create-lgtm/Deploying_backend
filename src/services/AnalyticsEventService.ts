@@ -1,6 +1,7 @@
 import { AnalyticsEvent, AnalyticsEventType, DeviceType, SourceType, IAnalyticsEvent } from '../models/AnalyticsEvent';
 import { v4 as uuidv4 } from 'uuid';
 import UAParser from 'ua-parser-js';
+import { lookupIP } from './GeoIPService';
 
 /**
  * Enhanced Event Parameters (supports new fields)
@@ -187,16 +188,14 @@ export class AnalyticsEventService {
     }
 
     /**
-     * Get coarse location from IP (simplified)
+     * Get coarse location from IP using GeoIPService
      */
     private async getCoarseLocation(ipAddress: string): Promise<string | null> {
-        // In production, use a geo-IP service like MaxMind or ip-api
         try {
-            // Skip local/private IPs
-            if (ipAddress === '127.0.0.1' || ipAddress === '::1' || ipAddress.startsWith('192.168.')) {
-                return 'local';
+            const result = await lookupIP(ipAddress);
+            if (result) {
+                return result.country;
             }
-            // Would integrate with geo-IP service here
             return null;
         } catch {
             return null;
@@ -204,7 +203,7 @@ export class AnalyticsEventService {
     }
 
     /**
-     * Log HUB_IMPRESSION event (enhanced)
+     * Log HUB_IMPRESSION event (enhanced) - Uses sync logging for real-time analytics
      */
     async logHubImpression(
         hubId: string,
@@ -214,7 +213,8 @@ export class AnalyticsEventService {
         ip?: string,
         sourceType: SourceType = SourceType.DIRECT
     ): Promise<void> {
-        await this.logEvent({
+        // Use sync logging for immediate DB write (critical for analytics)
+        await this.logEventSync({
             event_type: AnalyticsEventType.HUB_IMPRESSION,
             hub_id: hubId,
             session_id: sessionId,
@@ -227,6 +227,7 @@ export class AnalyticsEventService {
 
     /**
      * Log LINK_CLICK event (enhanced with rule and position tracking)
+     * Uses sync logging for real-time analytics
      */
     async logLinkClick(
         hubId: string,
@@ -243,7 +244,8 @@ export class AnalyticsEventService {
             source_type?: SourceType;
         }
     ): Promise<void> {
-        await this.logEvent({
+        // Use sync logging for immediate DB write (critical for analytics)
+        await this.logEventSync({
             event_type: AnalyticsEventType.LINK_CLICK,
             hub_id: hubId,
             link_id: linkId,
@@ -260,7 +262,7 @@ export class AnalyticsEventService {
     }
 
     /**
-     * Log REDIRECT event (enhanced)
+     * Log REDIRECT event (enhanced) - Uses sync logging for real-time analytics
      */
     async logRedirect(
         hubId: string,
@@ -275,7 +277,8 @@ export class AnalyticsEventService {
             source_type?: SourceType;
         }
     ): Promise<void> {
-        await this.logEvent({
+        // Use sync logging for immediate DB write
+        await this.logEventSync({
             event_type: AnalyticsEventType.REDIRECT,
             hub_id: hubId,
             variant_id: variantId,

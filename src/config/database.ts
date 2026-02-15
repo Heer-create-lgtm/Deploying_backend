@@ -25,6 +25,32 @@ export const connectMongoDB = async (): Promise<void> => {
     });
 };
 
+// Serverless-safe connection: reuses existing connection if available
+let isConnecting = false;
+export const ensureMongoConnection = async (): Promise<void> => {
+    const state = mongoose.connection.readyState;
+    // 0 = disconnected, 1 = connected, 2 = connecting, 3 = disconnecting
+    if (state === 1) return; // Already connected
+    if (state === 2 || isConnecting) {
+        // Wait for ongoing connection
+        await new Promise<void>((resolve) => {
+            const check = setInterval(() => {
+                if (mongoose.connection.readyState === 1) {
+                    clearInterval(check);
+                    resolve();
+                }
+            }, 100);
+        });
+        return;
+    }
+    isConnecting = true;
+    try {
+        await connectMongoDB();
+    } finally {
+        isConnecting = false;
+    }
+};
+
 // Redis Client with Mock Fallback
 class MockRedis {
     private store = new Map<string, string>();
@@ -135,17 +161,20 @@ class MockRedis {
     }
 }
 
-// Try to use real Redis, fallback to Mock if configured or error
+// Try to use real Redis, fallback to Mock if configured
 const useMock = process.env.USE_MOCK_REDIS === 'true';
 
-// @ts-ignore
-export const redis = useMock ? new MockRedis() : (process.env.REDIS_URL ? new Redis(process.env.REDIS_URL) : new Redis({
-    host: process.env.REDIS_HOST || 'localhost',
-    port: parseInt(process.env.REDIS_PORT || '6379', 10),
-    password: process.env.REDIS_PASSWORD || undefined,
-    retryDelayOnFailover: 100,
-    maxRetriesPerRequest: 3,
-}));
+// Support REDIS_URL (single string) or individual REDIS_HOST/PORT/PASSWORD
+export const redis = useMock ? new MockRedis() : (
+    process.env.REDIS_URL
+        ? new Redis(process.env.REDIS_URL)
+        : new Redis({
+            host: process.env.REDIS_HOST || 'localhost',
+            port: parseInt(process.env.REDIS_PORT || '6379', 10),
+            password: process.env.REDIS_PASSWORD || undefined,
+            maxRetriesPerRequest: 3,
+        })
+);
 
 if (!useMock) {
     (redis as any).on('connect', () => {

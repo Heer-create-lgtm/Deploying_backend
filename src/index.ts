@@ -3,7 +3,7 @@ dotenv.config();
 
 import express from 'express';
 import cors from 'cors';
-import { connectMongoDB, closeConnections } from './config/database';
+import { connectMongoDB, ensureMongoConnection, closeConnections } from './config/database';
 import { redirectRoutes, adminRoutes, authRoutes, analyticsRoutes, shorturlRoutes, exportRoutes } from './routes';
 import {
     redirectLimiter,
@@ -16,12 +16,23 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 
 // Middleware
-app.use(cors());
+app.use(cors({
+    origin: process.env.FRONTEND_URL || 'http://localhost:3000',
+    credentials: true,
+    methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'Authorization'],
+}));
 app.use(express.json({ limit: '1mb' })); // Limit payload size
 app.use(metricsMiddleware);
 
 // Trust proxy for getting real IP addresses
 app.set('trust proxy', true);
+
+// Ensure MongoDB is connected for every request (serverless-safe)
+app.use(async (_req, _res, next) => {
+    await ensureMongoConnection();
+    next();
+});
 
 // Health check
 app.get('/health', (_req, res) => {
@@ -30,6 +41,22 @@ app.get('/health', (_req, res) => {
         timestamp: new Date().toISOString(),
         uptime: process.uptime(),
     });
+});
+
+// Keep-alive endpoint — prevents Vercel cold starts
+// Called by: Vercel cron (every 10 min) + frontend KeepAlive component (every 5 min)
+app.get('/api/keep-alive', async (_req, res) => {
+    try {
+        await ensureMongoConnection();
+        res.json({
+            status: 'warm',
+            timestamp: new Date().toISOString(),
+            uptime: process.uptime(),
+            mongodb: 'connected',
+        });
+    } catch (error) {
+        res.status(500).json({ status: 'cold', error: 'Failed to warm up' });
+    }
 });
 
 // Metrics endpoint (Prometheus format)
@@ -67,65 +94,49 @@ app.use((err: Error, _req: express.Request, res: express.Response, _next: expres
 // Import migration function
 import { migrateShortCodes } from './models/LinkHub';
 
-// Start server
-async function start(): Promise<void> {
-    try {
-        // Connect to MongoDB
-        await connectMongoDB();
+// Start server (only when running locally, not in Vercel serverless)
+const isVercel = process.env.VERCEL === '1';
 
-        // Run migrations for short_code
+if (!isVercel) {
+    async function start(): Promise<void> {
         try {
-            const migrated = await migrateShortCodes();
-            if (migrated > 0) {
-                console.log(`✓ Migrated ${migrated} hubs with short_code`);
+            // Connect to MongoDB
+            await connectMongoDB();
+
+            // Run migrations for short_code
+            try {
+                const migrated = await migrateShortCodes();
+                if (migrated > 0) {
+                    console.log(`✓ Migrated ${migrated} hubs with short_code`);
+                }
+            } catch (migrationError) {
+                console.warn('Warning: Short code migration error:', migrationError);
             }
-        } catch (migrationError) {
-            console.warn('Warning: Short code migration error:', migrationError);
+
+            // Start Express server
+            app.listen(PORT, () => {
+                console.log(`\n✓ Server running on http://localhost:${PORT}`);
+                console.log(`  GET  /health         - Health check`);
+                console.log(`  POST /api/auth/login - Login & get JWT`);
+                console.log(`  GET  /api/admin/hubs - List your hubs`);
+            });
+
+            // Graceful shutdown
+            const shutdown = async () => {
+                console.log('\nShutting down server...');
+                await closeConnections();
+                process.exit(0);
+            };
+
+            process.on('SIGINT', shutdown);
+            process.on('SIGTERM', shutdown);
+        } catch (error) {
+            console.error('Failed to start server:', error);
+            process.exit(1);
         }
-
-        // Start Express server
-        app.listen(PORT, () => {
-            console.log(`\n✓ Server running on http://localhost:${PORT}`);
-            console.log(`\nPublic Endpoints:`);
-            console.log(`  GET  /health         - Health check`);
-            console.log(`  GET  /metrics        - Prometheus metrics`);
-            console.log(`  GET  /:slug          - Redirect to resolved URL`);
-            console.log(`  GET  /:slug/debug    - Debug resolution without redirect`);
-            console.log(`  GET  /r/:code        - Short URL redirect (6-char Base62)`);
-            console.log(`\nAuth Endpoints:`);
-            console.log(`  POST /api/auth/register - Create account`);
-            console.log(`  POST /api/auth/login    - Login & get JWT`);
-            console.log(`  GET  /api/auth/me       - Get current user`);
-            console.log(`\nAdmin Endpoints (auth required):`);
-            console.log(`  GET  /api/admin/hubs               - List your hubs`);
-            console.log(`  POST /api/admin/hubs               - Create hub`);
-            console.log(`  GET  /api/admin/hubs/:hub_id       - Get hub`);
-            console.log(`  GET  /api/admin/hubs/:hub_id/stats - Analytics`);
-            console.log(`\nAnalytics Endpoints (auth required):`);
-            console.log(`  GET  /api/analytics/...            - Enhanced analytics`);
-            console.log(`\nExport Endpoints (auth required):`);
-            console.log(`  GET  /api/export/...               - Data export`);
-            console.log(`\nRate limits:`);
-            console.log(`  - Redirect: 200 req/min per IP`);
-            console.log(`  - Admin:    100 req/min per IP`);
-            console.log(`  - Login:    5 attempts/15min per IP`);
-        });
-
-        // Graceful shutdown
-        const shutdown = async () => {
-            console.log('\nShutting down server...');
-            await closeConnections();
-            process.exit(0);
-        };
-
-        process.on('SIGINT', shutdown);
-        process.on('SIGTERM', shutdown);
-    } catch (error) {
-        console.error('Failed to start server:', error);
-        process.exit(1);
     }
-}
 
-start();
+    start();
+}
 
 export default app;

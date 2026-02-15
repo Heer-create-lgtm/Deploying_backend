@@ -23,7 +23,7 @@ function parseTimeWindow(range?: string): TimeWindow {
  * Validate hub ownership
  */
 async function validateHubAccess(hubId: string, userId: string): Promise<boolean> {
-    const hub = await LinkHub.findOne({ hub_id: hubId, owner_id: userId });
+    const hub = await LinkHub.findOne({ hub_id: hubId, owner_user_id: userId });
     return hub !== null;
 }
 
@@ -35,7 +35,7 @@ router.get('/hub/:hubId/overview', requireAuth, async (req: Request, res: Respon
     try {
         const { hubId } = req.params;
         const { range } = req.query;
-        const userId = (req as any).user?.userId;
+        const userId = (req as any).user?.user_id;
 
         // Validate access
         if (!await validateHubAccess(hubId, userId)) {
@@ -68,7 +68,7 @@ router.get('/hub/:hubId/timeseries', requireAuth, async (req: Request, res: Resp
     try {
         const { hubId } = req.params;
         const { range } = req.query;
-        const userId = (req as any).user?.userId;
+        const userId = (req as any).user?.user_id;
 
         if (!await validateHubAccess(hubId, userId)) {
             return res.status(403).json({ error: 'Access denied' });
@@ -101,7 +101,7 @@ router.get('/hub/:hubId/links', requireAuth, async (req: Request, res: Response)
     try {
         const { hubId } = req.params;
         const { range } = req.query;
-        const userId = (req as any).user?.userId;
+        const userId = (req as any).user?.user_id;
 
         if (!await validateHubAccess(hubId, userId)) {
             return res.status(403).json({ error: 'Access denied' });
@@ -134,7 +134,7 @@ router.get('/hub/:hubId/segments', requireAuth, async (req: Request, res: Respon
     try {
         const { hubId } = req.params;
         const { range } = req.query;
-        const userId = (req as any).user?.userId;
+        const userId = (req as any).user?.user_id;
 
         if (!await validateHubAccess(hubId, userId)) {
             return res.status(403).json({ error: 'Access denied' });
@@ -166,7 +166,7 @@ router.get('/hub/:hubId/heatmap', requireAuth, async (req: Request, res: Respons
     try {
         const { hubId } = req.params;
         const { range } = req.query;
-        const userId = (req as any).user?.userId;
+        const userId = (req as any).user?.user_id;
 
         if (!await validateHubAccess(hubId, userId)) {
             return res.status(403).json({ error: 'Access denied' });
@@ -202,7 +202,7 @@ router.get('/hub/:hubId/performance', requireAuth, async (req: Request, res: Res
     try {
         const { hubId } = req.params;
         const { range } = req.query;
-        const userId = (req as any).user?.userId;
+        const userId = (req as any).user?.user_id;
 
         if (!await validateHubAccess(hubId, userId)) {
             return res.status(403).json({ error: 'Access denied' });
@@ -232,7 +232,7 @@ import { enhancedAnalyticsService, TimeGranularity } from '../services/EnhancedA
 router.get('/hub/:hubId/kpi', requireAuth, async (req: Request, res: Response) => {
     try {
         const { hubId } = req.params;
-        const userId = (req as any).user?.userId;
+        const userId = (req as any).user?.user_id;
 
         if (!await validateHubAccess(hubId, userId)) {
             return res.status(403).json({ error: 'Access denied' });
@@ -265,7 +265,7 @@ router.get('/hub/:hubId/trends', requireAuth, async (req: Request, res: Response
     try {
         const { hubId } = req.params;
         const { granularity = 'day', days = '30' } = req.query;
-        const userId = (req as any).user?.userId;
+        const userId = (req as any).user?.user_id;
 
         if (!await validateHubAccess(hubId, userId)) {
             return res.status(403).json({ error: 'Access denied' });
@@ -301,7 +301,7 @@ router.get('/hub/:hubId/weekday-weekend', requireAuth, async (req: Request, res:
     try {
         const { hubId } = req.params;
         const { days = '30' } = req.query;
-        const userId = (req as any).user?.userId;
+        const userId = (req as any).user?.user_id;
 
         if (!await validateHubAccess(hubId, userId)) {
             return res.status(403).json({ error: 'Access denied' });
@@ -331,7 +331,7 @@ router.get('/hub/:hubId/countries', requireAuth, async (req: Request, res: Respo
     try {
         const { hubId } = req.params;
         const { range } = req.query;
-        const userId = (req as any).user?.userId;
+        const userId = (req as any).user?.user_id;
 
         if (!await validateHubAccess(hubId, userId)) {
             return res.status(403).json({ error: 'Access denied' });
@@ -358,7 +358,7 @@ router.get('/hub/:hubId/rules', requireAuth, async (req: Request, res: Response)
     try {
         const { hubId } = req.params;
         const { range } = req.query;
-        const userId = (req as any).user?.userId;
+        const userId = (req as any).user?.user_id;
 
         if (!await validateHubAccess(hubId, userId)) {
             return res.status(403).json({ error: 'Access denied' });
@@ -384,7 +384,7 @@ router.get('/hub/:hubId/rules', requireAuth, async (req: Request, res: Response)
 router.get('/hub/:hubId/compare', requireAuth, async (req: Request, res: Response) => {
     try {
         const { hubId } = req.params;
-        const userId = (req as any).user?.userId;
+        const userId = (req as any).user?.user_id;
 
         if (!await validateHubAccess(hubId, userId)) {
             return res.status(403).json({ error: 'Access denied' });
@@ -419,7 +419,7 @@ router.get('/hub/:hubId/position-impact', requireAuth, async (req: Request, res:
     try {
         const { hubId } = req.params;
         const { range } = req.query;
-        const userId = (req as any).user?.userId;
+        const userId = (req as any).user?.user_id;
 
         if (!await validateHubAccess(hubId, userId)) {
             return res.status(403).json({ error: 'Access denied' });
@@ -445,7 +445,7 @@ router.get('/hub/:hubId/position-impact', requireAuth, async (req: Request, res:
 router.get('/hub/:hubId/insights', requireAuth, async (req: Request, res: Response) => {
     try {
         const { hubId } = req.params;
-        const userId = (req as any).user?.userId;
+        const userId = (req as any).user?.user_id;
 
         if (!await validateHubAccess(hubId, userId)) {
             return res.status(403).json({ error: 'Access denied' });
@@ -483,7 +483,7 @@ router.get('/hub/:hubId/engagement', requireAuth, async (req: Request, res: Resp
     try {
         const { hubId } = req.params;
         const { range } = req.query;
-        const userId = (req as any).user?.userId;
+        const userId = (req as any).user?.user_id;
 
         if (!await validateHubAccess(hubId, userId)) {
             return res.status(403).json({ error: 'Access denied' });
@@ -515,7 +515,7 @@ router.get('/hub/:hubId/rage-clicks', requireAuth, async (req: Request, res: Res
     try {
         const { hubId } = req.params;
         const { range } = req.query;
-        const userId = (req as any).user?.userId;
+        const userId = (req as any).user?.user_id;
 
         if (!await validateHubAccess(hubId, userId)) {
             return res.status(403).json({ error: 'Access denied' });
@@ -612,7 +612,7 @@ router.get('/hub/:hubId/rage-clicks', requireAuth, async (req: Request, res: Res
 router.get('/hub/:hubId/link-ranking', requireAuth, async (req: Request, res: Response) => {
     try {
         const { hubId } = req.params;
-        const userId = (req as any).user?.userId;
+        const userId = (req as any).user?.user_id;
 
         if (!await validateHubAccess(hubId, userId)) {
             return res.status(403).json({ error: 'Access denied' });

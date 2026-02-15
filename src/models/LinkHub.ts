@@ -63,6 +63,7 @@ export interface ILinkHub extends Document {
     rule_tree_id?: mongoose.Types.ObjectId;
     owner_user_id?: string;
     short_code: string;  // Short URL code for /r/:code (6 chars, Base62)
+    external_short_url?: string;  // External shortened URL (TinyURL, is.gd, etc.)
     created_at: Date;
     updated_at: Date;
 }
@@ -110,6 +111,10 @@ const LinkHubSchema = new Schema<ILinkHub>({
         sparse: true,
         index: true,
         default: generateShortCode  // Generate 6-char Base62 short code
+    },
+    external_short_url: {
+        type: String,
+        default: null
     },
 }, {
     timestamps: { createdAt: 'created_at', updatedAt: 'updated_at' }
